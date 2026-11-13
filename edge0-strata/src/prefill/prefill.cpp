@@ -52,6 +52,9 @@
 #include "strata/prefill/moe_mmq.hpp"
 #include "strata/prefill/lat_group_tables.hpp"
 #include "strata/prefill/lat_q3k_fused.hpp"   // M4: STRATA_LAT_FUSED_Q3K
+#if defined(STRATA_USE_HIP)
+#include "strata/prefill/lat_dense_w11.hpp"   // the latent D / U projections on the gfx11 matrix cores
+#endif
 #include "strata/prefill/moe_fused_q3k.hpp"   // the q3k pack's variant of v5's latent kernel
 #include "strata/core/peer_experts.hpp"
 #include "strata/core/expert_nibble.hpp"
@@ -4988,7 +4991,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 const char* v = std::getenv("STRATA_LATENT_FUSED_DU");
                                 return v == nullptr || v[0] != '0';
                             }();
+#if defined(STRATA_USE_HIP)   // gfx11: the D / U projections have their own WMMA kernels (lat_dense_w11.cu); the
+                            // fused A stage stays CUDA-only, so latent_fused_available() is false here
+                            const bool lat_du = lat_du_env && dense_w11::available(m.lat_fmt);
+#else
                             const bool lat_du = lat_du_env && fused::latent_fused_available();
+#endif
                             // D: each token's 8 group products [T, G*ELL] -> q8_1 rows (xlq)
                             pt.mark(kPfGather, m.cs);
                             strata::kernels::quantize_q8_1_rows(m.mixed, T, (int) N, m.lat_xq, m.cs);
@@ -4997,12 +5005,23 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 // DU kernel that folds 1/s into the xl columns; v5's pack has no scales and keeps
                                 // the original kernel (its signature and its bits are untouched)
                                 const float* lat_inv = strata::kernels::lat_gu_colscale_dev((int) l, (int) ELL);
+#if defined(STRATA_USE_HIP)
+                                // STRATA_LATENT_MMQ's A stage quantizes from the FP32 xl rows, so they are written
+                                // too when it is asked for; the native A stage reads xlq only
+                                static const bool lat_xl_f32 = [] {
+                                    const char* v = std::getenv("STRATA_LATENT_MMQ");
+                                    return v != nullptr && v[0] == '1';
+                                }();
+                                dense_w11::project_d(m.lat_d_dev + (size_t) l * m.lat_d.d_bytes(), m.lat_xq, T, (int) N,
+                                                     (int) G, ELL, m.xlq, lat_xl_f32 ? m.xl : nullptr, lat_inv, m.cs);
+#else
                                 if (lat_inv)
                                     fused_q3k::latent_dense_d(m.lat_d_dev + (size_t) l * m.lat_d.d_bytes(), m.lat_xq, T,
                                                               (int) N, (int) G, ELL, m.xlq, m.cs, m.lat_fmt, lat_inv);
                                 else
                                     fused::latent_dense_d(m.lat_d_dev + (size_t) l * m.lat_d.d_bytes(), m.lat_xq, T,
                                                           (int) N, (int) G, ELL, m.xlq, m.cs, m.lat_fmt);
+#endif
                             } else {
                                 strata::kernels::iq_mmvq(strata::kernels::lat_dense_fmt_to_type(m.lat_fmt),
                                         m.lat_d_dev + (size_t) l * m.lat_d.d_bytes(), m.lat_xq, m.xl, (int) N,
@@ -5908,11 +5927,18 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                                              (int32_t*) m.lat_scratch, (int32_t*) m.lat_scratch + 12,
                                                              (int32_t*) m.lat_scratch + 32, m.cs);
                                 // the grid bound without the counts: every split fits in ceil(n / 64) + G tiles
+#if defined(STRATA_USE_HIP)
+                                dense_w11::project_u(m.lat_u_dev + (size_t) l * m.lat_d.u_bytes(), m.ylq,
+                                                     (const int32_t*) m.lat_scratch + 32, (const int32_t*) m.lat_scratch,
+                                                     (int) G, ((int64_t) (T * K) + 63) / 64 + G, (int64_t) (T * K),
+                                                     (int) ELL, (int) N, m.Dm, m.cs);
+#else
                                 const int64_t unw = (((int64_t) (T * K) + 63) / 64 + G) * (N >> 8);
                                 fused::latent_dense_u(m.lat_u_dev + (size_t) l * m.lat_d.u_bytes(), m.ylq,
                                                       (const int32_t*) m.lat_scratch + 32, (const int32_t*) m.lat_scratch,
                                                       (int) G, unw, (int64_t) (T * K), (int) ELL, (int) N, m.Dm, m.cs,
                                                       m.lat_fmt);
+#endif
                             } else {
                                 strata::kernels::latent_u_grouped(m.lat_u_dev + (size_t) l * m.lat_d.u_bytes(), m.ylq, m.ids_p,
                                                  m.lat_labels_dev + (size_t) l * m.lat_E, m.lat_E, (int64_t) (T * K),

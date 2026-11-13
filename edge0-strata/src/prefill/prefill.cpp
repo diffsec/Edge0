@@ -5127,10 +5127,18 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 const char* v = std::getenv("STRATA_LATENT_FUSED_LOG");
                                 return v != nullptr && v[0] == '1';
                             }();
+#if defined(STRATA_USE_HIP)
+                            // HIP: the q3k pack's A stage has gfx11 kernels of its own (lat_q3k_w11); the NVFP4
+                            // pack's fused kernels are CUDA-only
+                            const bool lat_fused =
+                                lat_fused_env && !nib_l && lat_fused_q3k_on() && f.gu_type == 11 && f.d_type == 20 &&
+                                m.lat_I == 640 && fused_q3k::latent_fused_available();
+#else
                             const bool lat_fused =
                                 lat_fused_env && !nib_l && fused::latent_fused_available() &&
                                 ((f.gu_type == 40 && f.d_type == 40) ||
                                  (lat_fused_q3k_on() && f.gu_type == 11 && f.d_type == 20 && m.lat_I == 640));
+#endif
                             fused::LatentGeom lat_lg{};
                             size_t lat_h = 0;
                             if (lat_fused) {
@@ -5170,9 +5178,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                                  m.grp_d != nullptr && m.bounds_dev != nullptr && !nib_l;
                             // M4: STRATA_LAT_FUSED_Q3K=1 - the q3k pack only (Q3_K gate/up, IQ4_NL down, the 1280 /
                             // 640 latent geometry), and it takes the launches in place of both other paths.
+#if defined(STRATA_USE_HIP)
+                            const bool lat_fused_q3k = false;   // lat_q3k_fused's kernels are CUDA-only (stubs that exit)
+#else
                             const bool lat_fused_q3k = lat_fused_q3k_on() && f.gu_type == 11 /* GGML_TYPE_Q3_K */ &&
                                                        f.d_type == 20 /* GGML_TYPE_IQ4_NL */ && ELL == 1280 && m.lat_I == 640 &&
                                                        m.lat_hbuf != nullptr && m.lat_gcd != nullptr && !nib_l;
+#endif
                             if (lat_fused_q3k && !nib_l) {
                                 static bool noted = false;
                                 if (!noted) {

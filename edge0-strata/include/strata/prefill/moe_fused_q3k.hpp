@@ -12,6 +12,9 @@ void experts_latent_q3k(const fused::WideBatch& b, const fused::LatentGeom& g, i
                         const void* scratch, const void* xa, const int32_t* src, void* hbuf, float* dm, void* stream);
 
 
+/// This device runs experts_latent_q3k: sm_80 and newer, or a gfx11 device on HIP (lat_q3k_w11.hpp).
+bool latent_fused_available();
+
 // The latent D projection with the pack's shared column scale (inv = 1/s, one float an ell column; nullptr: none).
 void latent_dense_d(const void* w, const void* xq, int64_t M, int K, int G, int64_t ell, void* outq,
                     void* stream, int fmt, const float* inv);

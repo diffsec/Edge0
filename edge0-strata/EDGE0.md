@@ -239,6 +239,58 @@ Measured with `tools\strata_bench.py` on the card above (Ryzen 7 5800X3D, 64 GB 
 The prompt speed is far below the NVIDIA figures because the fused latent kernels have no HIP version yet. Answer
 quality on this build has only been checked by hand.
 
+## Build (Linux, AMD, experimental)
+
+Edge0 145B (Q3_K) runs on one Radeon RX 7900 XTX (gfx1100, 24 GB) under Linux with ROCm 7.2.4. The fused latent
+kernels are CUDA-only, so the three `STRATA_LATENT_FUSED*` variables below are `0`. A layer split across two cards
+does not work: the first request stops with `Memory access fault by GPU node-2`. `edge0-infer` does not start this
+build, so start the server by hand.
+
+Requirements: ROCm 7 with the HIP compiler and hipBLAS (the commands below were run in the
+`docker.io/rocm/dev-ubuntu-24.04:7.2.4-complete` image), CMake 3.24 or newer, Ninja, and Python 3.10 or newer.
+
+1. Unpack llama.cpp into `third_party/llama.cpp` as in step 1 of [Build (Linux, NVIDIA)](#build-linux-nvidia).
+2. Build the engine. `STRATA_PREFILL_MMQ=ON` is required: without it the link stops with undefined symbols such as
+   `strata::prefill::fused_q3k::experts_latent_q3k`.
+
+   ```
+   export HIP_PATH="$(hipconfig -R)"
+   cmake -S . -B build-hip -G Ninja -DCMAKE_BUILD_TYPE=Release \
+     -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DCMAKE_HIP_ARCHITECTURES=gfx1100 \
+     -DCMAKE_HIP_COMPILER="$(hipconfig -l)/clang++" -DCMAKE_PREFIX_PATH=/opt/rocm \
+     -DSTRATA_PREFILL_MMQ=ON -DSTRATA_NATIVE_EXPERTS=ON \
+     -DSTRATA_GGML_DIR="$PWD/third_party/llama.cpp"
+   cmake --build build-hip --target strata
+   ```
+
+3. Create the server's Python environment as in step 3 of [Build (Linux, NVIDIA)](#build-linux-nvidia).
+4. Write a server configuration from `edge0/models/edge0-145b.json`. Replace the placeholders, set `exe` to
+   `build-hip/strata`, add `"backend": "hip"`, and set `lib_dirs` to the ROCm library directory (`/opt/rocm/lib`).
+   Set `cwd` and `log` to a directory that the server can write to. In `env`, set `STRATA_LATENT_FUSED`,
+   `STRATA_LATENT_FUSED_DU` and `STRATA_LAT_FUSED_Q3K` to `0`, and set `STRATA_LATENT_DENSE_FMT` to `8`.
+   `STRATA_LATENT_MMQ=1` is optional and makes the prompt faster. Do not set `--pool-workers` above the number of
+   physical cores; without the option the engine chooses.
+5. Start it: `.venv/bin/python serve/server.py --engine strata --config <file> --port 8000`. The process needs
+   `/dev/kfd` and `/dev/dri`. With more than one card, select one with `HIP_VISIBLE_DEVICES`.
+
+Use a card on a full-width PCIe link. The engine moves experts between host memory and the card while it decodes,
+and it prints each card's link speed at the start of a layer split (`link 0.8 GB/s`). `current_link_width` of each
+bridge above the card in `/sys/bus/pci/devices` shows a narrow link.
+
+Measured on a Ryzen 5 5600X with 64 GB RAM and two RX 7900 XTX cards, one card in use, `--vram-reserve-mib 700`,
+with a client that sends three chat questions of 150 tokens and one fresh prompt of each size (thinking off, one run
+each, not `tools/strata_bench.py`):
+
+| Card link | `STRATA_LATENT_MMQ` | Experts resident | Chat decode tok/s | 5.3K prompt tok/s | 21K prompt tok/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| PCIe 4.0 x16 | unset | 6652 | 47.7 to 57.1 | 214.3 | 216.7 |
+| PCIe 4.0 x16 | `1` | 6652 | 46.4 to 55.1 | 269.1 | 280.2 |
+| PCIe 3.0 x1 | unset | 7802 | 17.8 to 23.3 | 108.3 | 129.1 |
+| PCIe 3.0 x1 | `1` | 7802 | 16.5 to 21.6 | 108.5 | 145.2 |
+
+The x16 card also held 1.8 GiB of another process's memory, which is why it has fewer experts resident. Answer
+quality on this build has only been checked by hand.
+
 ## Launch contract with edge0-infer
 
 - `edge0/CONTRACT` holds one integer, the contract version (currently 4). `edge0-infer` refuses to start an

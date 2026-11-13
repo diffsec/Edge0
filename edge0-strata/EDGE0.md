@@ -241,11 +241,13 @@ quality on this build has only been checked by hand.
 
 ## Build (Linux, AMD, experimental)
 
-Edge0 145B (Q3_K) runs on one Radeon RX 7900 XTX (gfx1100, 24 GB) under Linux with ROCm 7.2.4. The fused kernels
-of the expert stage are CUDA-only, so `STRATA_LATENT_FUSED` and `STRATA_LAT_FUSED_Q3K` are `0` below. The two dense
-projections of a latent layer have gfx11 kernels (`src/prefill/lat_dense_w11.cu`), so `STRATA_LATENT_FUSED_DU` keeps
-its default. A layer split across two cards does not work: the first request stops with
-`Memory access fault by GPU node-2`. `edge0-infer` does not start this build, so start the server by hand.
+Edge0 145B (Q3_K) runs on a Radeon RX 7900 XTX (gfx1100, 24 GB) under Linux with ROCm 7.2.4. The expert stage and
+the two dense projections of a latent layer have gfx11 kernels (`src/prefill/lat_q3k_w11.cu`,
+`src/prefill/lat_dense_w11.cu`). `edge0-infer` does not start this build, so start the server by hand.
+
+A layer split across two cards works (`"gpu": [0, 1]`), with one limit: do not set `--pcie-mode dma` on a split.
+With that option, the first expert that a card does not hold is never copied, and the request stops with
+`verify: timed out at layer N` or with `Memory access fault by GPU node-2`.
 
 Requirements: ROCm 7 with the HIP compiler, hipBLAS and hipBLASLt (the commands below were run in the
 `docker.io/rocm/dev-ubuntu-24.04:7.2.4-complete` image), CMake 3.24 or newer, Ninja, and Python 3.10 or newer.
@@ -278,8 +280,8 @@ Requirements: ROCm 7 with the HIP compiler, hipBLAS and hipBLASLt (the commands 
 5. Write a server configuration from `edge0/models/edge0-145b.json`. Replace the placeholders, set `exe` to
    `build-hip/strata`, add `"backend": "hip"`, and set `lib_dirs` to the ROCm library directory (`/opt/rocm/lib`).
    Set `cwd` and `log` to a directory that the server can write to. In `env`, set `STRATA_LATENT_FUSED` and
-   `STRATA_LAT_FUSED_Q3K` to `0`, `STRATA_LATENT_DENSE_FMT` to `8`, and `STRATA_LATENT_MMQ` to `1`. Do not set
-   `--pool-workers` above the number of physical cores; without the option the engine chooses.
+   `STRATA_LAT_FUSED_Q3K` to `1`, and `STRATA_LATENT_DENSE_FMT` to `8`. Do not set `--pool-workers` above the number
+   of physical cores; without the option the engine chooses.
 6. Start it: `.venv/bin/python serve/server.py --engine strata --config <file> --port 8000`. The process needs
    `/dev/kfd` and `/dev/dri`. With more than one card, select one with `HIP_VISIBLE_DEVICES`.
 
@@ -293,15 +295,23 @@ tokens and one fresh prompt of each size, thinking off, one run each; it is not 
 
 | Card link | Configuration | Chat decode tok/s | 5.3K prompt tok/s | 21K prompt tok/s |
 | --- | --- | ---: | ---: | ---: |
-| PCIe 4.0 x16 | all of the above | 46.2 to 51.1 | 1202.0 | 1316.1 |
-| PCIe 4.0 x16 | no tuning table | not measured | 724.9 | not measured |
-| PCIe 4.0 x16 | no tuning table, `STRATA_LATENT_FUSED_DU=0` | 46.4 to 55.1 | 269.1 | 280.2 |
-| PCIe 4.0 x16 | no tuning table, `STRATA_LATENT_FUSED_DU=0`, `STRATA_LATENT_MMQ` unset | 47.7 to 57.1 | 214.3 | 216.7 |
-| PCIe 3.0 x1 | no tuning table, `STRATA_LATENT_FUSED_DU=0`, `STRATA_LATENT_MMQ` unset | 17.8 to 23.3 | 108.3 | 129.1 |
+| PCIe 4.0 x16 | all of the above | not measured | 1181.8 | 1302.1 |
+| PCIe 4.0 x16 | expert stage on ggml MMQ: `STRATA_LATENT_FUSED=0`, `STRATA_LAT_FUSED_Q3K=0`, `STRATA_LATENT_MMQ=1` | 46.2 to 51.1 | 1157.2 to 1202.0 | 1285.3 to 1316.1 |
+| PCIe 4.0 x16 | MMQ expert stage, no tuning table | not measured | 724.9 | not measured |
+| PCIe 4.0 x16 | MMQ expert stage, no tuning table, `STRATA_LATENT_FUSED_DU=0` | 46.4 to 55.1 | 269.1 | 280.2 |
+| PCIe 4.0 x16 | native expert stage, no tuning table, `STRATA_LATENT_FUSED_DU=0` | 47.7 to 57.1 | 214.3 | 216.7 |
+| PCIe 3.0 x1 | native expert stage, no tuning table, `STRATA_LATENT_FUSED_DU=0` | 17.8 to 23.3 | 108.3 | 129.1 |
 
-Answer quality on this build has only been checked by hand and by the first token's log-probabilities: against
-`STRATA_LATENT_FUSED_DU=0`, the top-8 log-probabilities of four prompts move by at most 0.57, and the two expert
-stages (`STRATA_LATENT_MMQ` set and unset) differ from each other by up to 2.41 on the same prompts.
+The gfx11 expert stage and the MMQ expert stage ran in different sessions, and the same MMQ configuration measured
+1157.2 and 1202.0 tok/s on the 5.3K prompt, so the two stages are level within the run-to-run spread.
+
+Two cards in a layer split, layers 0 to 21 on the PCIe 3.0 x1 card and 22 to 47 on the x16 card, decoded chat
+answers at 14.5 to 20.7 tok/s. Every window passes through the x1 card, so the split runs at that card's speed.
+
+Answer quality on this build has only been checked by hand and by the first token's log-probabilities over four
+prompts. The gfx11 expert stage moves the top-8 log-probabilities by at most 0.48 against the MMQ stage. The gfx11
+projections move them by at most 0.57 against `STRATA_LATENT_FUSED_DU=0`. The two upstream expert stages (native and
+MMQ) differ from each other by up to 2.41 on the same prompts.
 
 ## Launch contract with edge0-infer
 

@@ -250,8 +250,17 @@ layers, and on a split the token embedding table stays in mapped host memory wha
 card cannot read another card's VRAM: HIP answers "an illegal memory access was encountered", and the window or the
 draft layer then never finishes. Add `--resident-experts` to keep in RAM only the experts that no card holds.
 
-Do not set `--pcie-mode dma` on a split. It was not tested again after the fix above. Before the fix, the first
-expert that a card did not hold was never copied, and the request stopped with `verify: timed out at layer N`.
+`--pcie-mode dma` works on a split. With it, a 5.3K prompt ran at 316.5 to 328.1 tok/s, against 231.8 to 284.9
+tok/s without it.
+
+Edge0 120B (Q3_K) needs two changes to its `model.json` values on these cards:
+
+- Set `STRATA_LATENT_DENSE` to `latent_dense_q8.bin` and `STRATA_LATENT_DENSE_FMT` to `8`. The gfx11 projections
+  read the 8-bit file only (`dense_w11::available`). With the 4-bit file a 5.3K prompt ran at 502.8 to 528.4 tok/s
+  on one card, and with the 8-bit file at 1194.4 to 1370.2 tok/s, for 1.17 GiB more VRAM.
+- On two cards, set `STRATA_VERIFY_ALL_RESIDENT=0`. Two 24 GB cards hold every expert of this model, and the
+  all-resident window then never finishes: the first card runs layer 0 as far as the router and does not start the
+  experts. The kernel log shows no GPU error. The cause is not known.
 
 Requirements: ROCm 7 with the HIP compiler, hipBLAS and hipBLASLt (the commands below were run in the
 `docker.io/rocm/dev-ubuntu-24.04:7.2.4-complete` image), CMake 3.24 or newer, Ninja, and Python 3.10 or newer.
@@ -310,9 +319,15 @@ The gfx11 expert stage and the MMQ expert stage ran in different sessions, and t
 1157.2 and 1202.0 tok/s on the 5.3K prompt, so the two stages are level within the run-to-run spread.
 
 Two cards in a layer split with `--resident-experts`, layers 0 to 21 on the PCIe 3.0 x1 card and 22 to 47 on the x16
-card: the cards held 27.0 GiB of the 37.3 GiB of experts, and the engine kept 21.4 GiB of experts in RAM, where one
-card keeps all 37.3 GiB. The process took 32.5 GB of RAM. Chat answers decoded at 32.2 to 51.2 tok/s. A 5.3K prompt
-ran at 272.9 to 284.6 tok/s and a 21K prompt at 413.2 tok/s, because the prompt path streams experts to the x1 card.
+card: the cards held 28.8 GiB of the 37.3 GiB of experts, and the engine kept 19.6 GiB of experts in RAM, where one
+card keeps all 37.3 GiB. The process took 30.6 GB of RAM. Chat answers decoded at 38.1 to 54.6 tok/s. With
+`--pcie-mode dma` a 5.3K prompt ran at 316.5 to 329.2 tok/s and a 21K prompt at 486.6 tok/s, because the prompt path
+streams experts to the x1 card.
+
+Edge0 120B (Q3_K) with the 8-bit dense file, on the x16 card alone: chat answers decoded at 51.2 to 68.7 tok/s, a
+5.3K prompt ran at 1194.4 to 1370.2 tok/s and a 21K prompt at 1506.6 tok/s. On the two-card split with
+`STRATA_VERIFY_ALL_RESIDENT=0`, every expert was in VRAM: chat answers decoded at 43.9 to 62.0 tok/s, a 5.3K prompt
+ran at 387.1 to 410.1 tok/s and a 21K prompt at 601.3 tok/s, and the process took 19.7 GB of RAM.
 
 Answer quality on this build has only been checked by hand and by the first token's log-probabilities over four
 prompts. The gfx11 expert stage moves the top-8 log-probabilities by at most 0.48 against the MMQ stage. The gfx11

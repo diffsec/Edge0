@@ -6945,7 +6945,8 @@ int main(int argc, char** argv) {
     };
     if (o.expert_cache < 0) {
         // latent MoE: the session D/U pair is loaded before the free-VRAM read, so auto leaves room for it
-        { std::string le; if (!lat_tab.load(g, le)) { std::fprintf(stderr, "strata generate: %s\n", le.c_str()); return 1; } }
+        // (a layer split: only the first stage's layers, the later stages hold their own)
+        { std::string le; if (!lat_tab.load(g, le, 0, multi_gpu && !split_at.empty() ? split_at[0] : -1)) { std::fprintf(stderr, "strata generate: %s\n", le.c_str()); return 1; } }
         size_t free_b = 0, total_b = 0;
         free_b = strata::core::device_free_bytes(); (void) total_b;
         if (free_b == 0 && o.prefill_head_alias) {
@@ -10271,7 +10272,7 @@ int main(int argc, char** argv) {
             for (int st = 0; st + 1 < n_stages; ++st) stage_ver_p(st, 1).set_next(&stage_ver_p(st + 1, 1), &split_drive_b);
         }
         ver.set_remote_expert_opt(remote_opt.get());
-        { std::string le; if (!lat_tab.load(g, le)) { std::fprintf(stderr, "strata serve: %s\n", le.c_str()); return 1; } }
+        { std::string le; if (!lat_tab.load(g, le, 0, multi_gpu && !split_at.empty() ? split_at[0] : -1)) { std::fprintf(stderr, "strata serve: %s\n", le.c_str()); return 1; } }
         if (pcie_balance() && n_stages == 1) ver.set_pcie_balance(&drive.d.pcie_model);
         if (batch_mtp) ver.set_batch_graph_limit(64);   // --batch-mtp only: slot rotation makes many layouts (LRU); 0.1.39 keeps all
         if (!ver.init(wt, g, ss, vh, native_head.loaded() || prefill_head_alias_bound ? &native_head : nullptr,

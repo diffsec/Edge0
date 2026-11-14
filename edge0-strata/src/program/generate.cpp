@@ -232,8 +232,17 @@ struct LatentTab {
     int64_t lat_H = 0, lat_ELL = 0, lat_I = 0;
     int lat_G = 8, lat_E = 0;
     bool latent = false;
-    bool load(const strata::core::ModelGeometry& g, std::string& err) {
-        if (d != nullptr) { strata::core::latent_shared_d() = d; strata::core::latent_shared_u() = u; return true; }
+    bool opened = false;
+    // The pair on the CURRENT device, for layers [lb, le) (le < 0: every layer).  A layer split's later stage calls
+    // this on its own device: device memory cannot be read from another device, so each device has its own pair.
+    // A stage's pair holds only its layers; the pointers are offset so that layer l is at d + l * d_bytes.
+    bool load(const strata::core::ModelGeometry& g, std::string& err, int64_t lb = 0, int64_t le = -1) {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        if (strata::core::latent_shared_d(dev) != nullptr) return true;
+        if (le < 0 || le > g.n_layers) le = g.n_layers;
+        if (lb < 0 || lb >= le) lb = 0;
+        if (opened) return upload(g, dev, lb, le, err);
         const auto& lay0 = strata::kernels::cpu::expert_layout();
         if (!(lay0.native && !lay0.fmt.empty() && lay0.fmt[0].n_embd != (int64_t) g.n_embd)) return true;
         latent = true;
@@ -257,22 +266,32 @@ struct LatentTab {
             std::fclose(lf);
             if (got != labels.size()) { err = "latent dense: " + lp + " is too small"; return false; }
         }
-        const uint64_t db = (uint64_t) g.n_layers * dense.d_bytes(), ub = (uint64_t) g.n_layers * dense.u_bytes();
-        if (cudaMalloc((void**) &d, db) != cudaSuccess || cudaMalloc((void**) &u, ub) != cudaSuccess) {
+        opened = true;
+        return upload(g, dev, lb, le, err);
+    }
+    bool upload(const strata::core::ModelGeometry& g, int dev, int64_t lb, int64_t le, std::string& err) {
+        (void) g;
+        const uint64_t db = (uint64_t) (le - lb) * dense.d_bytes(), ub = (uint64_t) (le - lb) * dense.u_bytes();
+        uint8_t *dd = nullptr, *du = nullptr;
+        if (cudaMalloc((void**) &dd, db) != cudaSuccess || cudaMalloc((void**) &du, ub) != cudaSuccess) {
             const cudaError_t ce = cudaGetLastError();
-            if (d) { cudaFree(d); d = nullptr; }
-            if (u) { cudaFree(u); u = nullptr; }
+            if (dd) cudaFree(dd);
+            if (du) cudaFree(du);
             err = std::string("the latent D/U device buffers could not be had (") + cudaGetErrorString(ce) + ")";
             return false;
         }
-        for (int64_t l = 0; l < g.n_layers; ++l)
-            if (cudaMemcpy(d + (size_t) l * dense.d_bytes(), dense.d(l), dense.d_bytes(), cudaMemcpyHostToDevice) != cudaSuccess ||
-                cudaMemcpy(u + (size_t) l * dense.u_bytes(), dense.u(l), dense.u_bytes(), cudaMemcpyHostToDevice) != cudaSuccess) {
+        for (int64_t l = lb; l < le; ++l)
+            if (cudaMemcpy(dd + (size_t) (l - lb) * dense.d_bytes(), dense.d(l), dense.d_bytes(), cudaMemcpyHostToDevice) != cudaSuccess ||
+                cudaMemcpy(du + (size_t) (l - lb) * dense.u_bytes(), dense.u(l), dense.u_bytes(), cudaMemcpyHostToDevice) != cudaSuccess) {
                 err = "the latent D/U upload failed at layer " + std::to_string(l);
                 return false;
             }
-        strata::core::latent_shared_d() = d;
-        strata::core::latent_shared_u() = u;
+        // layer l is read at base + l * bytes: a stage's pair starts at its first layer
+        strata::core::latent_shared_d(dev) = dd - (size_t) lb * dense.d_bytes();
+        strata::core::latent_shared_u(dev) = du - (size_t) lb * dense.u_bytes();
+        if (d == nullptr) { d = strata::core::latent_shared_d(dev); u = strata::core::latent_shared_u(dev); }
+        std::fprintf(stderr, "strata generate: latent D/U on CUDA%d: layers %lld-%lld, %.2f GiB\n", dev, (long long) lb,
+                     (long long) le - 1, (double) (db + ub) / 1073741824.0);
         return true;
     }
 } lat_tab;
@@ -4486,7 +4505,7 @@ int main(int argc, char** argv) {
         }
         const auto embed_t0 = std::chrono::steady_clock::now();
         if (!native_embed.load(o.embd_gguf.empty() ? o.native_shards : std::vector<std::string>{o.embd_gguf}, g.n_embd,
-                               g.n_vocab, err)) {
+                               g.n_vocab, err, !multi_gpu)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
@@ -6046,6 +6065,8 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < stages.size(); ++i) {
         GpuStage& st = *stages[i];
         const strata::core::OnDevice on(st.dev);
+        // latent MoE: this stage's own D/U pair, for the layers it runs, before its expert cache is sized
+        { std::string le; if (!lat_tab.load(g, le, st.lb, st.le)) { std::fprintf(stderr, "strata generate: layer split, CUDA%d: %s\n", st.dev, le.c_str()); return 1; } }
         void* sbuf_s = nullptr;
         if (cudaMalloc(&sbuf_s, strata::core::session_bytes(g, o.max_context, K, st.lb, st.le)) != cudaSuccess ||
             strata::core::session_init(g, o.max_context, K, sbuf_s, st.ss, st.lb, st.le) == 0) {
@@ -6924,7 +6945,8 @@ int main(int argc, char** argv) {
     };
     if (o.expert_cache < 0) {
         // latent MoE: the session D/U pair is loaded before the free-VRAM read, so auto leaves room for it
-        { std::string le; if (!lat_tab.load(g, le)) { std::fprintf(stderr, "strata generate: %s\n", le.c_str()); return 1; } }
+        // (a layer split: only the first stage's layers, the later stages hold their own)
+        { std::string le; if (!lat_tab.load(g, le, 0, multi_gpu && !split_at.empty() ? split_at[0] : -1)) { std::fprintf(stderr, "strata generate: %s\n", le.c_str()); return 1; } }
         size_t free_b = 0, total_b = 0;
         free_b = strata::core::device_free_bytes(); (void) total_b;
         if (free_b == 0 && o.prefill_head_alias) {
@@ -10250,7 +10272,7 @@ int main(int argc, char** argv) {
             for (int st = 0; st + 1 < n_stages; ++st) stage_ver_p(st, 1).set_next(&stage_ver_p(st + 1, 1), &split_drive_b);
         }
         ver.set_remote_expert_opt(remote_opt.get());
-        { std::string le; if (!lat_tab.load(g, le)) { std::fprintf(stderr, "strata serve: %s\n", le.c_str()); return 1; } }
+        { std::string le; if (!lat_tab.load(g, le, 0, multi_gpu && !split_at.empty() ? split_at[0] : -1)) { std::fprintf(stderr, "strata serve: %s\n", le.c_str()); return 1; } }
         if (pcie_balance() && n_stages == 1) ver.set_pcie_balance(&drive.d.pcie_model);
         if (batch_mtp) ver.set_batch_graph_limit(64);   // --batch-mtp only: slot rotation makes many layouts (LRU); 0.1.39 keeps all
         if (!ver.init(wt, g, ss, vh, native_head.loaded() || prefill_head_alias_bound ? &native_head : nullptr,

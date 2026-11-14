@@ -189,7 +189,10 @@ public:
     bool set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& err);
     /// A session-level shared latent D/U pair (allocated and uploaded elsewhere, e.g. the engine): the init
     /// keeps no copy of its own and skips its upload; the prompt path only reads the pair.  Set before the first `run`.
-    void set_shared_latent(uint8_t* d, uint8_t* u) { strata::core::latent_shared_d() = d; strata::core::latent_shared_u() = u; }
+    void set_shared_latent(int device, uint8_t* d, uint8_t* u) {
+        strata::core::latent_shared_d(device) = d;
+        strata::core::latent_shared_u(device) = u;
+    }
 
     /// Plan v0.3 P6: called after every chunk with the chunk's final multi-stream residual rows (device,
     /// T x hc*n_embd, valid until the next chunk) and the chunk's first position; the MTP draft layer builds its

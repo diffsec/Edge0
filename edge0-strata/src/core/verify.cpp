@@ -1066,8 +1066,10 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             // every layer's D and U, resident: the graph covers all layers and touches them per layer
             // (the shared pair from set_shared_latent: no own copy, read-only for every verifier)
             if (lat_d_shared_ == nullptr) {   // the session-level pair (LatentTab::load) when nobody passed it in
-                lat_d_shared_ = strata::core::latent_shared_d();
-                lat_u_shared_ = strata::core::latent_shared_u();
+                int lat_dev = 0;   // this verifier's device: the pair of another device cannot be read here
+                cudaGetDevice(&lat_dev);
+                lat_d_shared_ = strata::core::latent_shared_d(lat_dev);
+                lat_u_shared_ = strata::core::latent_shared_u(lat_dev);
             }
             if (lat_d_shared_ == nullptr) {
                 lat_d_ = b.take<uint8_t>((uint64_t) g.n_layers * lat_dense_.d_bytes());
@@ -2193,11 +2195,19 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             // same path the f32 rows take).  Bit-exact to the host's from_float (probe_std); the
             // xlseq doorbell after both copies covers it.
             quantize_q8_0_rows(lat_xl_, (long long) T * lat_G_, (long long) lat_ELL_, lat_act0_dev_, cs);
+#if defined(STRATA_USE_HIP)   // amd-hip port: HIP does not capture a D2H memcpy into the verify window's graph ("end capture: operation
+            // failed due to a previous error during capture"); a copy kernel writes the same bytes into the mapped host rows
+            strata::kernels::copy_bytes_from_mapped(m_latact0_, lat_act0_dev_,
+                                                    (int64_t) ((size_t) T * (size_t) lat_G_ * ((size_t) lat_ELL_ / 32) * 34), cs);
+            strata::kernels::copy_bytes_from_mapped(m_latxlq_, lat_xl_,
+                                                    (int64_t) ((size_t) T * (size_t) lat_G_ * (size_t) lat_ELL_ * 4), cs);
+#else
             cudaMemcpyAsync(m_latact0_, lat_act0_dev_,
                             (size_t) T * (size_t) lat_G_ * ((size_t) lat_ELL_ / 32) * 34,
                             cudaMemcpyDeviceToHost, cs);
             cudaMemcpyAsync(m_latxlq_, lat_xl_, (size_t) T * (size_t) lat_G_ * (size_t) lat_ELL_ * 4,
                             cudaMemcpyDeviceToHost, cs);
+#endif   // STRATA_USE_HIP (amd-hip port)
             if (trace_m_ != nullptr) gpu_stamp(trace_m_, (l * kProfPer + 35) * 2, cs);   // K0-probe: D2H done
             doorbell_publish_value(nullptr, nullptr, nullptr, 0, 0, nullptr, nullptr, nullptr,
                                    (uint32_t*) m_xlseq_, (uint32_t) l + 1, cs);
@@ -2730,6 +2740,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         }
         // #879: whether each row's logits are all finite, beside the pick (read after the window's own sync)
         if (nan_guard_on()) strata::kernels::logits_nonfinite_rows(head_logits_, T, (int) n_vocab_, m_nf_, cs);
+#if !defined(STRATA_USE_HIP)   // amd-hip port: a debug dump that does a synchronous D2H cudaMemcpy inside the window's graph capture; HIP fails the capture on it ("end capture: operation failed due to a previous error during capture")
         if (windows <= 12 && n_vocab_ > 0 && T > 0) {
             static std::vector<float> tmp;
             tmp.resize((size_t) n_vocab_);
@@ -2749,6 +2760,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                          std::sqrt(s2 / (double) n_vocab_));
             std::fflush(stderr);
         }
+#endif   // !STRATA_USE_HIP (amd-hip port)
     }
     stamp(g.n_layers, 1, 0);
     if (tap_on_ && !batch_rec_ && tap_file_ != nullptr) copy_from_mapped(m_tap_, tap_dev_, (int64_t) T * (int64_t) tap_layers_.size() * N, cs);
@@ -2883,6 +2895,7 @@ bool Verifier::capture(int T, std::string& err) {
         err = std::string("verify: end capture: ") + cudaGetErrorString(ce);
         return false;
     }
+#if !defined(STRATA_USE_HIP)   // amd-hip port: this dump uses cudaGraph* names the HIP shim of this file does not map; HIP has its own listing below
     if (graph) {   // K0: dump node order (unconditional — env was not reaching the engine) (D2H / wait_flag / H2D / kernel)
         size_t nn = 0;
         if (cudaGraphGetNodes(graph, nullptr, &nn) == cudaSuccess && nn > 0) {
@@ -2909,6 +2922,7 @@ bool Verifier::capture(int T, std::string& err) {
             }
         }
     }
+#endif   // !STRATA_USE_HIP (amd-hip port)
 #if defined(STRATA_USE_HIP)   // 143-amdk: the same listing on HIP (kernel names by hipKernelNameRefByPtr); STRATA_VERIFY_NODES=2 also lists the first nodes in graph order
     if (std::getenv("STRATA_VERIFY_NODES") != nullptr) {
         size_t nn = 0;

@@ -193,6 +193,147 @@ interpreter. To run `build\strata.exe` by hand, put the CUDA DLLs on `PATH` firs
 (`set "PATH=%CUDA_PATH%\bin;%PATH%"`). The engine writes temporary files under `%TMP%`, which must be
 writable for the user who runs `edge0-infer`.
 
+## Build (Windows, AMD, experimental)
+
+Edge0 145B (Q3_K) has been run on one AMD card with the HIP backend this fork inherits from Strata: a Radeon RX 7900
+XTX (gfx1100, 24 GB) under Windows 11, ROCm 10.2.0a20260930. Other Radeon cards, Linux, Edge0 120B and the NVFP4
+folders have not been tried. `edge0-infer` does not start this build (it expects CUDA), so the server is started by
+hand.
+
+Requirements: Visual Studio 2022 Build Tools with the C++ workload, Python 3.10 or newer, Git, and a current AMD
+display driver. No ROCm or HIP SDK installation: the build script installs ROCm from AMD's wheels into `.rocm-win`
+(about 7 GB).
+
+1. Build and package the engine for the card's architecture, in this directory:
+
+   ```bat
+   set STRATA_HIP_ARCHS=gfx1100
+   set STRATA_NO_VISION=1
+   tools\hip\build_windows.bat
+   ```
+
+   The result is `dist\strata-windows-x64-hip.zip` (`strata.exe`, the ROCm DLLs in `rocm\bin`, the hipBLASLt tuning
+   table in `tuning\`). Unpack it into a folder, for example `engine-hip\`.
+2. Create the server's Python environment as in step 3 of [Build (Windows, NVIDIA)](#build-windows-nvidia).
+3. Write a server configuration from `edge0/models/edge0-145b.json`: replace the placeholders by hand, set `exe` to
+   the unpacked `strata.exe`, add `"backend": "hip"`, and set `lib_dirs` to the unpacked `rocm\bin`. In `env`:
+
+   | Variable | Value | Why |
+   | --- | --- | --- |
+   | `STRATA_LATENT_FUSED`, `STRATA_LATENT_FUSED_DU`, `STRATA_LAT_FUSED_Q3K` | `0` | the fused latent kernels are CUDA-only; the engine exits if they are selected on HIP |
+   | `STRATA_LATENT_MMQ` | `1` (optional) | the latent A stage of the prompt on MMQ; about a third faster than the default path on this card |
+   | `STRATA_LATENT_DENSE_FMT` | `8` or `4` | the engine reads the number, not `q8` / `q4` |
+   | `STRATA_LATENT_A`, `STRATA_LATENT_DENSE` | paths with `/` | `labels.bin` is looked up beside `STRATA_LATENT_A` by its last `/`, so a path with only `\` is not found |
+   | `STRATA_HIPBLASLT_TUNING` | the table in `tuning\` | as in upstream Strata's AMD configurations |
+
+4. Start it: `.venv\Scripts\python.exe serve\server.py --engine strata --config <file> --port 8000`.
+
+Measured with `tools\strata_bench.py` on the card above (Ryzen 7 5800X3D, 64 GB RAM, `--vram-reserve-mib 3072`, about
+4100 experts resident; medians):
+
+| A stage of the prompt | Chat decode tok/s | 4K prompt tok/s | 16K prompt tok/s | Agent decode tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| default (`native_expert_grouped`) | 37.9 | 243.6 | 241.3 | 43.6 |
+| `STRATA_LATENT_MMQ=1` | 40.4 | 335.0 | 319.3 | 47.2 |
+
+The prompt speed is far below the NVIDIA figures because the fused latent kernels have no HIP version yet. Answer
+quality on this build has only been checked by hand.
+
+## Build (Linux, AMD, experimental)
+
+Edge0 145B (Q3_K) runs on a Radeon RX 7900 XTX (gfx1100, 24 GB) under Linux with ROCm 7.2.4. The expert stage and
+the two dense projections of a latent layer have gfx11 kernels (`src/prefill/lat_q3k_w11.cu`,
+`src/prefill/lat_dense_w11.cu`). `edge0-infer` does not start this build, so start the server by hand.
+
+A layer split across two cards works (`"gpu": [0, 1]`). Each card holds the latent D and U weights of its own
+layers, and on a split the token embedding table stays in mapped host memory whatever `STRATA_EMBED_VRAM` says. A
+card cannot read another card's VRAM: HIP answers "an illegal memory access was encountered", and the window or the
+draft layer then never finishes. Add `--resident-experts` to keep in RAM only the experts that no card holds.
+
+`--pcie-mode dma` works on a split. With it, a 5.3K prompt ran at 316.5 to 328.1 tok/s, against 231.8 to 284.9
+tok/s without it.
+
+Edge0 120B (Q3_K) needs two changes to its `model.json` values on these cards:
+
+- Set `STRATA_LATENT_DENSE` to `latent_dense_q8.bin` and `STRATA_LATENT_DENSE_FMT` to `8`. The gfx11 projections
+  read the 8-bit file only (`dense_w11::available`). With the 4-bit file a 5.3K prompt ran at 502.8 to 528.4 tok/s
+  on one card, and with the 8-bit file at 1194.4 to 1370.2 tok/s, for 1.17 GiB more VRAM.
+- On two cards, set `STRATA_VERIFY_ALL_RESIDENT=0`. Two 24 GB cards hold every expert of this model, and the
+  all-resident window then never finishes: the first card runs layer 0 as far as the router and does not start the
+  experts. The kernel log shows no GPU error. The cause is not known.
+
+Requirements: ROCm 7 with the HIP compiler, hipBLAS and hipBLASLt (the commands below were run in the
+`docker.io/rocm/dev-ubuntu-24.04:7.2.4-complete` image), CMake 3.24 or newer, Ninja, and Python 3.10 or newer.
+
+1. Unpack llama.cpp into `third_party/llama.cpp` as in step 1 of [Build (Linux, NVIDIA)](#build-linux-nvidia).
+2. Build the engine. `STRATA_PREFILL_MMQ=ON` is required: without it the link stops with undefined symbols such as
+   `strata::prefill::fused_q3k::experts_latent_q3k`.
+
+   ```
+   export HIP_PATH="$(hipconfig -R)"
+   cmake -S . -B build-hip -G Ninja -DCMAKE_BUILD_TYPE=Release \
+     -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DCMAKE_HIP_ARCHITECTURES=gfx1100 \
+     -DCMAKE_HIP_COMPILER="$(hipconfig -l)/clang++" -DCMAKE_PREFIX_PATH=/opt/rocm \
+     -DSTRATA_PREFILL_MMQ=ON -DSTRATA_NATIVE_EXPERTS=ON \
+     -DSTRATA_GGML_DIR="$PWD/third_party/llama.cpp"
+   cmake --build build-hip --target strata
+   ```
+
+3. Copy the hipBLASLt tuning table for the card and the hipBLASLt version into `tuning/` beside the engine. The
+   engine reads it from there and prints `hipBLASLt tuning enabled`. Without it the dense prompt products use plain
+   hipBLAS, and a 5.3K prompt ran at 725 tok/s where it runs at 1150 tok/s with the table. ROCm 7.2.4 has hipBLASLt
+   1.2.2, which is table `100202`:
+
+   ```
+   mkdir -p build-hip/tuning
+   cp tools/hip/gfx1100-hipblaslt-100202.txt build-hip/tuning/
+   ```
+
+4. Create the server's Python environment as in step 3 of [Build (Linux, NVIDIA)](#build-linux-nvidia).
+5. Write a server configuration from `edge0/models/edge0-145b.json`. Replace the placeholders, set `exe` to
+   `build-hip/strata`, add `"backend": "hip"`, and set `lib_dirs` to the ROCm library directory (`/opt/rocm/lib`).
+   Set `cwd` and `log` to a directory that the server can write to. In `env`, set `STRATA_LATENT_FUSED` and
+   `STRATA_LAT_FUSED_Q3K` to `1`, and `STRATA_LATENT_DENSE_FMT` to `8`. Do not set `--pool-workers` above the number
+   of physical cores; without the option the engine chooses.
+6. Start it: `.venv/bin/python serve/server.py --engine strata --config <file> --port 8000`. The process needs
+   `/dev/kfd` and `/dev/dri`. With more than one card, select one with `HIP_VISIBLE_DEVICES`.
+
+Use a card on a full-width PCIe link. The engine moves experts between host memory and the card while it decodes,
+and it prints each card's link speed at the start of a layer split (`link 0.8 GB/s`). `current_link_width` of each
+bridge above the card in `/sys/bus/pci/devices` shows a narrow link.
+
+Measured on a Ryzen 5 5600X with 64 GB RAM and two RX 7900 XTX cards, one card in use, `--vram-reserve-mib 700`,
+6652 experts resident (the card also held 1.8 GiB of another process). The client sends three chat questions of 150
+tokens and one fresh prompt of each size, thinking off, one run each; it is not `tools/strata_bench.py`.
+
+| Card link | Configuration | Chat decode tok/s | 5.3K prompt tok/s | 21K prompt tok/s |
+| --- | --- | ---: | ---: | ---: |
+| PCIe 4.0 x16 | all of the above | not measured | 1181.8 | 1302.1 |
+| PCIe 4.0 x16 | expert stage on ggml MMQ: `STRATA_LATENT_FUSED=0`, `STRATA_LAT_FUSED_Q3K=0`, `STRATA_LATENT_MMQ=1` | 46.2 to 51.1 | 1157.2 to 1202.0 | 1285.3 to 1316.1 |
+| PCIe 4.0 x16 | MMQ expert stage, no tuning table | not measured | 724.9 | not measured |
+| PCIe 4.0 x16 | MMQ expert stage, no tuning table, `STRATA_LATENT_FUSED_DU=0` | 46.4 to 55.1 | 269.1 | 280.2 |
+| PCIe 4.0 x16 | native expert stage, no tuning table, `STRATA_LATENT_FUSED_DU=0` | 47.7 to 57.1 | 214.3 | 216.7 |
+| PCIe 3.0 x1 | native expert stage, no tuning table, `STRATA_LATENT_FUSED_DU=0` | 17.8 to 23.3 | 108.3 | 129.1 |
+
+The gfx11 expert stage and the MMQ expert stage ran in different sessions, and the same MMQ configuration measured
+1157.2 and 1202.0 tok/s on the 5.3K prompt, so the two stages are level within the run-to-run spread.
+
+Two cards in a layer split with `--resident-experts`, layers 0 to 21 on the PCIe 3.0 x1 card and 22 to 47 on the x16
+card: the cards held 28.8 GiB of the 37.3 GiB of experts, and the engine kept 19.6 GiB of experts in RAM, where one
+card keeps all 37.3 GiB. The process took 30.6 GB of RAM. Chat answers decoded at 38.1 to 54.6 tok/s. With
+`--pcie-mode dma` a 5.3K prompt ran at 316.5 to 329.2 tok/s and a 21K prompt at 486.6 tok/s, because the prompt path
+streams experts to the x1 card.
+
+Edge0 120B (Q3_K) with the 8-bit dense file, on the x16 card alone: chat answers decoded at 51.2 to 68.7 tok/s, a
+5.3K prompt ran at 1194.4 to 1370.2 tok/s and a 21K prompt at 1506.6 tok/s. On the two-card split with
+`STRATA_VERIFY_ALL_RESIDENT=0`, every expert was in VRAM: chat answers decoded at 43.9 to 62.0 tok/s, a 5.3K prompt
+ran at 387.1 to 410.1 tok/s and a 21K prompt at 601.3 tok/s, and the process took 19.7 GB of RAM.
+
+Answer quality on this build has only been checked by hand and by the first token's log-probabilities over four
+prompts. The gfx11 expert stage moves the top-8 log-probabilities by at most 0.48 against the MMQ stage. The gfx11
+projections move them by at most 0.57 against `STRATA_LATENT_FUSED_DU=0`. The two upstream expert stages (native and
+MMQ) differ from each other by up to 2.41 on the same prompts.
+
 ## Launch contract with edge0-infer
 
 - `edge0/CONTRACT` holds one integer, the contract version (currently 4). `edge0-infer` refuses to start an

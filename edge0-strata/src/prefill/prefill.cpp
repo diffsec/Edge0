@@ -1732,8 +1732,10 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         m.owned.push_back(m.lat_labels_dev);
     }
     if (m.latent && m.lat_d_dev == nullptr) {   // a session-shared pair when present (latent_share.hpp), else owned below
-        m.lat_d_dev = strata::core::latent_shared_d();
-        m.lat_u_dev = strata::core::latent_shared_u();
+        int lat_dev = 0;   // this prompt path's device: the pair of another device cannot be read here
+        cudaGetDevice(&lat_dev);
+        m.lat_d_dev = strata::core::latent_shared_d(lat_dev);
+        m.lat_u_dev = strata::core::latent_shared_u(lat_dev);
     }
     if (m.latent && m.lat_d_dev == nullptr) {   // no shared pair: one owned copy, uploaded once per session
         const uint64_t db = (uint64_t) g.n_layers * m.lat_d.d_bytes();

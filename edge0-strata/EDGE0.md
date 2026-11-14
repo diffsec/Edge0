@@ -245,9 +245,13 @@ Edge0 145B (Q3_K) runs on a Radeon RX 7900 XTX (gfx1100, 24 GB) under Linux with
 the two dense projections of a latent layer have gfx11 kernels (`src/prefill/lat_q3k_w11.cu`,
 `src/prefill/lat_dense_w11.cu`). `edge0-infer` does not start this build, so start the server by hand.
 
-A layer split across two cards works (`"gpu": [0, 1]`), with one limit: do not set `--pcie-mode dma` on a split.
-With that option, the first expert that a card does not hold is never copied, and the request stops with
-`verify: timed out at layer N` or with `Memory access fault by GPU node-2`.
+A layer split across two cards works (`"gpu": [0, 1]`). Each card holds the latent D and U weights of its own
+layers, and on a split the token embedding table stays in mapped host memory whatever `STRATA_EMBED_VRAM` says. A
+card cannot read another card's VRAM: HIP answers "an illegal memory access was encountered", and the window or the
+draft layer then never finishes. Add `--resident-experts` to keep in RAM only the experts that no card holds.
+
+Do not set `--pcie-mode dma` on a split. It was not tested again after the fix above. Before the fix, the first
+expert that a card did not hold was never copied, and the request stopped with `verify: timed out at layer N`.
 
 Requirements: ROCm 7 with the HIP compiler, hipBLAS and hipBLASLt (the commands below were run in the
 `docker.io/rocm/dev-ubuntu-24.04:7.2.4-complete` image), CMake 3.24 or newer, Ninja, and Python 3.10 or newer.
@@ -305,8 +309,10 @@ tokens and one fresh prompt of each size, thinking off, one run each; it is not 
 The gfx11 expert stage and the MMQ expert stage ran in different sessions, and the same MMQ configuration measured
 1157.2 and 1202.0 tok/s on the 5.3K prompt, so the two stages are level within the run-to-run spread.
 
-Two cards in a layer split, layers 0 to 21 on the PCIe 3.0 x1 card and 22 to 47 on the x16 card, decoded chat
-answers at 14.5 to 20.7 tok/s. Every window passes through the x1 card, so the split runs at that card's speed.
+Two cards in a layer split with `--resident-experts`, layers 0 to 21 on the PCIe 3.0 x1 card and 22 to 47 on the x16
+card: the cards held 27.0 GiB of the 37.3 GiB of experts, and the engine kept 21.4 GiB of experts in RAM, where one
+card keeps all 37.3 GiB. The process took 32.5 GB of RAM. Chat answers decoded at 32.2 to 51.2 tok/s. A 5.3K prompt
+ran at 272.9 to 284.6 tok/s and a 21K prompt at 413.2 tok/s, because the prompt path streams experts to the x1 card.
 
 Answer quality on this build has only been checked by hand and by the first token's log-probabilities over four
 prompts. The gfx11 expert stage moves the top-8 log-probabilities by at most 0.48 against the MMQ stage. The gfx11

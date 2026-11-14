@@ -1066,8 +1066,10 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             // every layer's D and U, resident: the graph covers all layers and touches them per layer
             // (the shared pair from set_shared_latent: no own copy, read-only for every verifier)
             if (lat_d_shared_ == nullptr) {   // the session-level pair (LatentTab::load) when nobody passed it in
-                lat_d_shared_ = strata::core::latent_shared_d();
-                lat_u_shared_ = strata::core::latent_shared_u();
+                int lat_dev = 0;   // this verifier's device: the pair of another device cannot be read here
+                cudaGetDevice(&lat_dev);
+                lat_d_shared_ = strata::core::latent_shared_d(lat_dev);
+                lat_u_shared_ = strata::core::latent_shared_u(lat_dev);
             }
             if (lat_d_shared_ == nullptr) {
                 lat_d_ = b.take<uint8_t>((uint64_t) g.n_layers * lat_dense_.d_bytes());

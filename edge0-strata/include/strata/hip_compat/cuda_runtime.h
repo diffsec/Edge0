@@ -11,6 +11,9 @@
 #endif
 #include <hip/hip_runtime.h>
 #include <hip/hip_version.h>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 // Do not let HIP's legacy macro corrupt libstdc++ attribute names.
 #ifdef __noinline__
 #undef __noinline__
@@ -94,17 +97,13 @@ hipError_t mem_get_info(size_t* free_bytes, size_t* total_bytes);
 #else
 #define cudaMemGetInfo hipMemGetInfo
 #endif
-#define cudaMemcpy hipMemcpy
 #define cudaMemcpy2DAsync hipMemcpy2DAsync
-#define cudaMemcpyAsync hipMemcpyAsync
 #define cudaMemcpyPeerAsync hipMemcpyPeerAsync
 #define cudaMemcpyPeer hipMemcpyPeer
 #define cudaMemcpyDefault hipMemcpyDefault
 #define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
-#define cudaMemset hipMemset
-#define cudaMemsetAsync hipMemsetAsync
 #define cudaPeekAtLastError hipPeekAtLastError
 #define cudaRuntimeGetVersion hipRuntimeGetVersion
 #define cudaSetDevice hipSetDevice
@@ -130,6 +129,86 @@ inline hipError_t malloc_host(T** pointer, size_t bytes) {
     return hipHostMalloc(reinterpret_cast<void**>(pointer), bytes, hipHostMallocDefault);
 }
 }  // namespace strata::hip_compat
+
+// ---- copies and fills on the buffer's own device.
+// CUDA takes a memcpy or a memset of any device's buffer whatever the current device is, and the engine's layer
+// split relies on that.  HIP runs such a call on the CURRENT device's queue.  A blocking hipMemset of another
+// device's buffer then returns before that device sees the bytes (measured on two gfx1100 cards, ROCm 7.2.4: a
+// kernel launched on the buffer's device right after the call still read the old bytes), so the fill lands late,
+// over whatever that device wrote in between.  With more than one device, these wrappers make the buffer's device
+// current for the call.  A call on a stream of its own is left alone: the stream names the device.
+// STRATA_HIP_XDEV_LOG=1 prints the first calls that needed the switch.
+namespace strata::hip_compat {
+inline bool multi_device() {
+    static const bool multi = [] {
+        int n = 0;
+        return hipGetDeviceCount(&n) == hipSuccess && n > 1;
+    }();
+    return multi;
+}
+// the device that owns `p`, or -1 for host memory and for a pointer HIP does not know
+inline int device_of(const void* p) {
+    hipPointerAttribute_t a{};
+    if (p == nullptr) return -1;
+    if (hipPointerGetAttributes(&a, p) != hipSuccess) {
+        (void) hipGetLastError();   // a plain host pointer: not an error of the caller's
+        return -1;
+    }
+    return a.type == hipMemoryTypeDevice ? a.device : -1;
+}
+struct DeviceScope {
+    int previous = -1;
+    DeviceScope(int device, const char* what, const char* file, int line, size_t bytes) {
+        int cur = 0;
+        if (device < 0 || hipGetDevice(&cur) != hipSuccess || cur == device || hipSetDevice(device) != hipSuccess) return;
+        previous = cur;
+        static const bool log = [] {
+            const char* v = std::getenv("STRATA_HIP_XDEV_LOG");
+            return v != nullptr && v[0] == '1';
+        }();
+        static std::atomic<int> shown{0};
+        if (log && shown.fetch_add(1) < 200)
+            std::fprintf(stderr, "strata hip: %s of %zu bytes on device %d while device %d was current (%s:%d)\n", what,
+                         bytes, device, cur, file, line);
+    }
+    ~DeviceScope() {
+        if (previous >= 0) (void) hipSetDevice(previous);
+    }
+    DeviceScope(const DeviceScope&) = delete;
+    DeviceScope& operator=(const DeviceScope&) = delete;
+};
+// the device side of a copy: the source of a device-to-host copy, else the destination
+inline int copy_device(const void* dst, const void* src, hipMemcpyKind kind) {
+    if (kind == hipMemcpyDeviceToHost) return device_of(src);
+    const int d = device_of(dst);
+    return d >= 0 ? d : device_of(src);
+}
+inline hipError_t memcpy_on(const char* file, int line, void* dst, const void* src, size_t n, hipMemcpyKind kind) {
+    if (!multi_device()) return hipMemcpy(dst, src, n, kind);
+    const DeviceScope scope(copy_device(dst, src, kind), "memcpy", file, line, n);
+    return hipMemcpy(dst, src, n, kind);
+}
+inline hipError_t memcpy_async_on(const char* file, int line, void* dst, const void* src, size_t n, hipMemcpyKind kind,
+                                  hipStream_t stream = nullptr) {
+    if (stream != nullptr || !multi_device()) return hipMemcpyAsync(dst, src, n, kind, stream);
+    const DeviceScope scope(copy_device(dst, src, kind), "memcpy on the null stream", file, line, n);
+    return hipMemcpyAsync(dst, src, n, kind, stream);
+}
+inline hipError_t memset_on(const char* file, int line, void* dst, int value, size_t n) {
+    if (!multi_device()) return hipMemset(dst, value, n);
+    const DeviceScope scope(device_of(dst), "memset", file, line, n);
+    return hipMemset(dst, value, n);
+}
+inline hipError_t memset_async_on(const char* file, int line, void* dst, int value, size_t n, hipStream_t stream = nullptr) {
+    if (stream != nullptr || !multi_device()) return hipMemsetAsync(dst, value, n, stream);
+    const DeviceScope scope(device_of(dst), "memset on the null stream", file, line, n);
+    return hipMemsetAsync(dst, value, n, stream);
+}
+}  // namespace strata::hip_compat
+#define cudaMemcpy(...) strata::hip_compat::memcpy_on(__FILE__, __LINE__, __VA_ARGS__)
+#define cudaMemcpyAsync(...) strata::hip_compat::memcpy_async_on(__FILE__, __LINE__, __VA_ARGS__)
+#define cudaMemset(...) strata::hip_compat::memset_on(__FILE__, __LINE__, __VA_ARGS__)
+#define cudaMemsetAsync(...) strata::hip_compat::memset_async_on(__FILE__, __LINE__, __VA_ARGS__)
 
 template <typename Kernel>
 inline hipError_t cudaFuncSetAttribute(Kernel kernel, hipFuncAttribute attribute, int value) {

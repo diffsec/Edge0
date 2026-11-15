@@ -1,4 +1,5 @@
 # macOS
 .DS_Store
+/scripts/__pycache__/
 
 # The engine in edge0-infer/ has its own .gitignore for its build output.

@@ -13,6 +13,7 @@ bench/micro/*.bin
 bench/micro/*.dll
 bench/micro/*.txt
 *.log
+gpucore.*.gpu
 build*/
 pack/
 logs/
@@ -33,6 +34,7 @@ td.log
 /.venv/
 /build/
 /third_party/llama.cpp
+/third_party/downloads/
 /models/
 /packs/
 /mtp/

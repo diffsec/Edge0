@@ -13,7 +13,7 @@ def main() -> None:
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--rocm-root", type=Path, required=True)
-    parser.add_argument("--context", type=int, default=16384)
+    parser.add_argument("--context", type=int, default=32768)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 

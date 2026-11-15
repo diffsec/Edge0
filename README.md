@@ -14,7 +14,7 @@
 
 <p align="center"><sub>Project</sub><br>
 <img src="assets/edge0-release/badge-group-divider.svg" alt="" width="540" height="16"><br>
-<a href="https://arxiv.org/abs/2609.18063"><img src="assets/edge0-release/badges/arxiv-badge.svg" alt="arXiv / 2609.18063" height="18"></a> <a href="https://github.com/Edge0-AI/Edge0"><img src="assets/edge0-release/badges/github-badge.svg" alt="GitHub / Edge0-AI/Edge0" height="18"></a> <a href="https://edge0.ai/discord"><img src="assets/edge0-release/badges/discord-badge.svg" alt="Discord / Join us" height="18"></a> <a href="LICENSE"><img src="assets/edge0-release/badges/license-badge.svg" alt="License / Apache 2.0" height="18"></a> <a href="https://github.com/Edge0-AI/Edge0/releases"><img src="assets/edge0-release/badges/windows-releases-badge.svg" alt="Windows / Download" height="18"></a>
+<a href="https://arxiv.org/abs/2609.18063"><img src="assets/edge0-release/badges/arxiv-badge.svg" alt="arXiv / 2609.18063" height="18"></a> <a href="https://github.com/Edge0-AI/Edge0"><img src="assets/edge0-release/badges/github-badge.svg" alt="GitHub / Edge0-AI/Edge0" height="18"></a> <a href="https://edge0.ai/discord"><img src="assets/edge0-release/badges/discord-badge.svg" alt="Discord / Join us" height="18"></a> <a href="LICENSE"><img src="assets/edge0-release/badges/license-badge.svg" alt="License / Apache 2.0" height="18"></a> <a href="https://github.com/Edge0-AI/Edge0/releases"><img src="assets/edge0-release/badges/releases-badge.svg" alt="Windows · macOS / Download" height="18"></a>
 </p>
 
 <p align="center"><sub>Latest release</sub><br>
@@ -74,7 +74,7 @@
 
 Use it through the command line, a local API server, or the Edge0 Chat app.
 
-The latest release brings 145B and 120B latent-MoE models to a single NVIDIA GPU.
+The latest release brings 145B and 120B latent-MoE models to a single NVIDIA GPU or an Apple Silicon Mac.
 
 Trained natively at 4 bits, both models are available in Q3_K and NVFP4 for local agent workloads.
 
@@ -88,7 +88,7 @@ Support depends on the model and its engine.
 | --- | --- | --- |
 | **Linux** | NVIDIA GPU (CUDA 13) | CPU |
 | **Windows** | NVIDIA GPU (CUDA 13) | CPU, Vulkan |
-| **macOS** (Apple Silicon) | — | Metal, CPU |
+| **macOS** (Apple Silicon) | Metal | Metal, CPU |
 | **iOS** | — | Metal |
 | **Android** | — | CPU |
 
@@ -98,14 +98,14 @@ Use the [145B / 120B setup](#getting-started) for the latest release. The [previ
 
 <p>145B / 120B are the current latent-MoE series, derived from Qwen3.8-Flash-Next and trained natively at 4 bits.</p>
 
-They run on edge0-strata through `edge0-infer serve` and `edge0-infer chat`, on Linux or Windows with an NVIDIA GPU and CUDA 13.
+They run on edge0-strata through `edge0-infer serve` and `edge0-infer chat`, on Linux or Windows with an NVIDIA GPU and CUDA 13, or on macOS with Metal on Apple Silicon.
 
 **145B Q3_K · RTX 5090 D 24 GB:** 121.2 tok/s agent decode · 3554.9 tok/s 16K prefill.
 
 | Tier | Released checkpoint | Inference profile | Engine |
 |---|---|---|---|
-| [`edge0-145b`](docs/models/edge0-145b.md) | [`Edge0/Edge0-145B-q3k`](https://huggingface.co/Edge0/Edge0-145B-q3k) · [NVFP4](https://huggingface.co/Edge0/Edge0-145B-NVFP4) | Q3_K or NVFP4 latent experts (1792), 48 layers, 512 experts, K=10 | edge0-strata ✅ (Linux or Windows, NVIDIA GPU) |
-| [`edge0-120b`](docs/models/edge0-145b.md) | [`Edge0/Edge0-120B-q3k`](https://huggingface.co/Edge0/Edge0-120B-q3k) · [NVFP4](https://huggingface.co/Edge0/Edge0-120B-NVFP4) | Q3_K or NVFP4 latent experts (1280), 48 layers, 512 experts, K=10 | edge0-strata ✅ (Linux or Windows, NVIDIA GPU) |
+| [`edge0-145b`](docs/models/edge0-145b.md) | [`Edge0/Edge0-145B-q3k`](https://huggingface.co/Edge0/Edge0-145B-q3k) · [NVFP4](https://huggingface.co/Edge0/Edge0-145B-NVFP4) | Q3_K or NVFP4 latent experts (1792), 48 layers, 512 experts, K=10 | edge0-strata ✅ (Linux or Windows, NVIDIA GPU; macOS Apple Silicon, Metal, Q3_K) |
+| [`edge0-120b`](docs/models/edge0-145b.md) | [`Edge0/Edge0-120B-q3k`](https://huggingface.co/Edge0/Edge0-120B-q3k) · [NVFP4](https://huggingface.co/Edge0/Edge0-120B-NVFP4) | Q3_K or NVFP4 latent experts (1280), 48 layers, 512 experts, K=10 | edge0-strata ✅ (Linux or Windows, NVIDIA GPU; macOS Apple Silicon, Metal, Q3_K) |
 
 <details open>
 <summary><h3>Model overview · 145B Q3_K</h3></summary>
@@ -177,12 +177,13 @@ Highlighted rows show Q3_K. Click the table to view it at full size.
 <details>
 <summary>145B measurement conditions · constrained budget and memory residency</summary>
 
-`16 GiB VRAM + 20 GiB RAM` rows are the RTX 5090 D 24 GB again, constrained by cgroup to a 16 GiB VRAM and
-20 GiB system-RAM budget — not a different card. With residency on, the same card holds **Q3_K** (40.81 GiB of weights)
+The `16 GiB VRAM + 20 GiB RAM` rows are the same RTX 5090 D 24 GB, not a different card. VRAM is capped with `--vram-reserve-mib 8192`; system RAM by a cgroup (`MemoryMax=20G`, no swap). With residency on, the same card holds **Q3_K** (40.81 GiB of weights)
 as 23.14 GiB VRAM + 31.28 GiB RAM, and **NVFP4** (47.79 GiB) as 23.25 GiB VRAM + 38.27 GiB RAM — disjoint expert sets,
 nothing counted twice.
 
-The 16 GiB VRAM + 20 GiB RAM budget is a test limit, not a minimum system requirement. The Apple M2 Ultra row is a Metal measurement, not an announcement of macOS release availability.
+See [Usage & troubleshooting](#usage-help) for memory-saving options.
+
+The 16 GiB VRAM + 20 GiB RAM budget is a test limit, not a minimum system requirement. The Apple M2 Ultra row is a Metal measurement.
 
 </details>
 
@@ -211,6 +212,8 @@ The 16 GiB VRAM + 20 GiB RAM budget is a test limit, not a minimum system requir
 20 GiB system-RAM budget — not a different card. With residency on, the same card holds **Q3_K** (27.98 GiB of weights)
 as 22.93 GiB VRAM + 18.40 GiB RAM, and **NVFP4** (32.96 GiB) as 23.02 GiB VRAM + 23.40 GiB RAM — disjoint expert sets,
 nothing counted twice.
+
+These residency readings use expert residency enabled, `--no-prefill-borrow`, conv cache = 0 and kv-resident = 0. Host RAM is measured as `RssAnon + RssShmem`. These are single-run readings, not minimum system requirements. See [Usage & troubleshooting](#usage-help) for memory-saving options.
 
 </details>
 
@@ -265,7 +268,7 @@ For 145B and 120B, use `serve` or `chat`; `run` belongs to the native engine.
 <details>
 <summary>Platform & documentation notes</summary>
 
-The build instructions target NVIDIA GPUs with CUDA 13 on Linux or Windows (x64 or ARM64). The Apple M2 Ultra measurements use Metal; they do not establish macOS release availability.
+The build instructions cover NVIDIA GPUs with CUDA 13 on Linux or Windows (x64 or ARM64), and Metal on Apple Silicon macOS.
 
 </details>
 
@@ -278,7 +281,7 @@ The build instructions target NVIDIA GPUs with CUDA 13 on Linux or Windows (x64 
 git clone https://github.com/Edge0-AI/Edge0.git edge0
 ```
 
-- **edge0-strata**, the engine: follow "Build (Linux, NVIDIA)" or "Build (Windows, NVIDIA)" in [edge0-strata/EDGE0.md](edge0-strata/EDGE0.md).
+- **edge0-strata**, the engine: follow "Build (Linux, NVIDIA)", "Build (Windows, NVIDIA)" or "Build (macOS, Apple Silicon)" in [edge0-strata/EDGE0.md](edge0-strata/EDGE0.md).
 - **edge0-infer**: follow "Build" (Linux) or "Windows" in [edge0-infer/docs/getting-started.md](edge0-infer/docs/getting-started.md).
 
 **2. Run from the command line.** Pass one model folder, such as `Edge0-145B-q3k`, not the folder that holds several of
@@ -301,13 +304,69 @@ curl localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '
 </details>
 
 <details>
-<summary>Desktop app · Windows</summary>
+<summary>Desktop app · Windows · macOS</summary>
 
 ⬇️ **Download:** **[GitHub Releases](https://github.com/Edge0-AI/Edge0/releases)**
 
-Open **Edge0 Chat** on Windows and choose a model folder, such as `Edge0-145B-q3k`, to run the model locally. To build the app from source, follow the [Edge0 Chat](edge0-infer/examples/desktop/README.md) guide.
+Open **Edge0 Chat** on Windows or macOS (Apple Silicon) and choose a model folder, such as `Edge0-145B-q3k`, to run the model locally. To build the app from source, follow the [Edge0 Chat](edge0-infer/examples/desktop/README.md) guide.
 
 </details>
+
+<a name="memory-update"></a>
+<a name="deployment-qa"></a>
+<a name="memory-deployment"></a>
+<a name="usage-help"></a>
+
+## Usage & troubleshooting
+
+145B / 120B · Memory options
+
+<details>
+<summary><a name="low-memory"></a>Low RAM · SSD offload</summary>
+
+- **SSD mode:** `--mmap-experts` — read uncached experts from SSD on demand.
+- **Low-memory arguments:**
+
+```bash
+--resident-budget-gib 20 --expert-profile expert-profile.bin
+```
+
+Up to **20 GiB** of host RAM for the expert cache; uncached experts are read from SSD on demand. Includes `--mmap-experts` and disjoint GPU/RAM caches automatically.
+
+**Required:** a static expert profile. Replace `expert-profile.bin` with your profile path.
+
+</details>
+<details>
+<summary><a name="ram-budget"></a>RAM budget · what 20 GiB covers</summary>
+
+- **Expert cache:** `--resident-budget-gib 20` caps host-RAM expert caching at **20 GiB**, lowered further to fit available memory.
+- **Total RAM:** expert cache + other runtime allocations. This flag does **not** set a total-process RAM limit.
+- **Benchmark limit:** the 20 GiB total RAM test budget is a separate measurement condition.
+
+</details>
+<details>
+<summary><a name="expert-residency"></a>GPU / RAM · avoid duplicate experts</summary>
+
+- **Enable:** `--resident-experts` or `--resident-budget-gib N`, with a static `--expert-profile`.
+- **Effect:** experts cached in VRAM need no duplicate RAM copy. Compatible with SSD loading.
+- **Default:** off, prioritizing speed.
+- **Automatically enabled:** `--mmap-experts`, `--resident-cpu-experts`, `--resident-pin`.
+
+</details>
+
+### Capacity controls · VRAM and host RAM
+
+These live in the pack's `model.json` (`args` for flags, `env` for environment variables), so a change there
+applies to every launch of the model.
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--vram-reserve-mib N` | VRAM left free for the desktop, the driver and other processes; the engine sizes its caches from what remains. | `700` |
+| `--expert-cache N\|auto` | Expert slots kept in VRAM. `auto` derives the count from the free VRAM after the fixed footprint (projections, MTP draft, verify buffers, D/U device buffers). | `0` |
+| `--kv-resident N` | KV cells kept in VRAM per QSA layer; the rest streams from pinned host RAM, which frees VRAM for experts. | `0` |
+| `--spec N` | The MTP drafter's verify window: tokens proposed per check. A bigger window needs bigger verify buffers (about 180 MiB at 4) and pays off when every window has a fixed per-layer cost. Without an MTP layer there is no speculation. | `4` |
+| `--resident-budget-gib N` | Cap on the host-RAM expert cache. It holds only the experts the VRAM cache does **not** hold, so the two sets are disjoint, and the value is clamped to the RAM available minus headroom. Needs a static `--expert-profile`. | `0` |
+| `--mmap-experts` | Read experts through the pack file on demand instead of pinning them, so nothing is resident in RAM. | off |
 
 ## Documentation
 

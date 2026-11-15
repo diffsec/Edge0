@@ -5371,7 +5371,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     for (size_t q = 0; q <= nb2 && q < 17; ++q)
                                         std::fprintf(stderr, "latmmq-bh[%zu]=%d\n", q, bh[q]);
                                 }
-#if !defined(STRATA_USE_HIP)   // amd-hip port: trace-only block (STRATA_LATENT_MMQ_TRACE), uses cudaPointerGetAttributes which the HIP shim does not map
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_GPU_METAL)   // CUDA-only pointer diagnostics
                                 {   // latmmq-dev: which device each buffer lives on, and the current one
                                     static bool devsaid = false;
                                     if (!devsaid && std::getenv("STRATA_LATENT_MMQ_TRACE") != nullptr) {
@@ -5400,7 +5400,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                                      devof(m.lat_gdst));
                                     }
                                 }
-#endif   // !STRATA_USE_HIP (amd-hip port)
+#endif
                                 auto run_p = [&](const mmq::Product& pr) {
                                     static const bool alt = std::getenv("STRATA_LATENT_MMQ_ALTCTX") != nullptr;
                                     static std::unique_ptr<mmq::Context> altctx;

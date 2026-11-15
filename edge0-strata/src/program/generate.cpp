@@ -245,6 +245,14 @@ struct LatentTab {
         if (opened) return upload(g, dev, lb, le, err);
         const auto& lay0 = strata::kernels::cpu::expert_layout();
         if (!(lay0.native && !lay0.fmt.empty() && lay0.fmt[0].n_embd != (int64_t) g.n_embd)) return true;
+#if defined(STRATA_GPU_METAL)
+        const char* enabled = std::getenv("STRATA_METAL_LATENT");
+        if (!enabled || std::strcmp(enabled, "1")) {
+            err = "enable the Metal latent path with STRATA_METAL_LATENT=1";
+            return false;
+        }
+        return true;   // The Metal window owns the latent files and GPU buffers.
+#else
         latent = true;
         lat_H = (int64_t) g.n_embd;
         lat_ELL = lay0.fmt[0].n_embd;
@@ -293,6 +301,7 @@ struct LatentTab {
         std::fprintf(stderr, "strata generate: latent D/U on CUDA%d: layers %lld-%lld, %.2f GiB\n", dev, (long long) lb,
                      (long long) le - 1, (double) (db + ub) / 1073741824.0);
         return true;
+#endif
     }
 } lat_tab;
 // Windows' WDDM driver model: native Windows, or WSL2 (its GPU goes through /dev/dxg to the Windows driver).  There,
@@ -4170,6 +4179,11 @@ int main(int argc, char** argv) {
         const auto& lay = strata::kernels::cpu::expert_layout();
         for (int64_t l = 0; lay.native && l < (int64_t) lay.fmt.size(); ++l) {
             const auto& f = lay.fmt[(size_t) l];
+#if defined(STRATA_GPU_METAL)
+            const char* latent = std::getenv("STRATA_METAL_LATENT");
+            if (latent && !std::strcmp(latent, "1") && (f.n_embd == 1280 || f.n_embd == 1792) && f.n_ff == 640 &&
+                f.gu_type == 11 && f.d_type == 20 && f.gu_colscale) continue;
+#endif
             if (!strata::kernels::native_expert_supported(f.gu_type, f.d_type, f.n_embd, f.n_ff)) {
                 std::fprintf(stderr, "strata generate: layer %lld's experts are %s/%s (ggml types %d/%d), which this "
                                      "engine has no GPU kernels for\n", (long long) l,

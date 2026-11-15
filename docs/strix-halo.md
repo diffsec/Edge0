@@ -71,6 +71,25 @@ Measured validation results from 2026-11-15:
 
 These are correctness-run measurements, not a controlled benchmark suite.
 
+The upstream community speed suite was also run three times against a fresh
+server, with thinking disabled and no other clients using port 8085:
+
+| Workload | Median | Range |
+| --- | ---: | ---: |
+| Short-chat decode | 28.0 tok/s | 27.3-40.4 tok/s |
+| 4K cold prefill | 666.0 tok/s | 652.6-666.3 tok/s |
+| 16K cold prefill | 644.7 tok/s | 643.6-644.9 tok/s |
+| Agent-turn decode | 27.6 tok/s | 23.8-35.0 tok/s |
+| Agent live-prefix cache hit | 65.4% | 65.4-65.6% |
+
+All measured requests passed. During the discarded calibration/warm-up phase,
+however, the engine watchdog restarted the engine three times after progress
+stopped at layer 17 of a small batched prompt. The engine recovered and the
+measured suite then completed without another restart. The suite skipped its
+nominal 32K case because its guard requires more room than the configured
+32,768-token context. The complete per-request report is in
+`docs/benchmarks/results/2026-11-15-community-8060s-edge0-120b/`.
+
 ## Required workarounds and current limit
 
 `STRATA_VERIFY_ALL_RESIDENT=0` is required. The zero-doorbell verification

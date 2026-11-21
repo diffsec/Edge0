@@ -5000,7 +5000,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     const char* v = std::getenv("STRATA_LATENT_MMQ");
                                     return v != nullptr && v[0] == '1';
                                 }();
-                                dense_w11::project_d(m.lat_d_dev + (size_t) l * m.lat_d.d_bytes(), m.lat_xq, T, (int) N,
+                                dense_w11::project_d(m.latent_du.d_at(l, m.lat_d), m.lat_xq, T, (int) N,
                                                      (int) G, ELL, m.xlq, lat_xl_f32 ? m.xl : nullptr, lat_inv, m.cs);
 #else
                                 if (lat_inv)
@@ -5942,7 +5942,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                                              (int32_t*) m.lat_scratch + 32, m.cs);
                                 // the grid bound without the counts: every split fits in ceil(n / 64) + G tiles
 #if defined(STRATA_USE_HIP)
-                                dense_w11::project_u(m.lat_u_dev + (size_t) l * m.lat_d.u_bytes(), m.ylq,
+                                dense_w11::project_u(m.latent_du.u_at(l, m.lat_d), m.ylq,
                                                      (const int32_t*) m.lat_scratch + 32, (const int32_t*) m.lat_scratch,
                                                      (int) G, ((int64_t) (T * K) + 63) / 64 + G, (int64_t) (T * K),
                                                      (int) ELL, (int) N, m.Dm, m.cs);
